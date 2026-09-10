@@ -2,11 +2,16 @@ import numpy as np
 import dedalus.public as d3
 import logging
 import os
+from mpi4py import MPI
 logger = logging.getLogger(__name__)
 
 import config
+from trans import scatter_from_zero
 
-def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, Prandtl=config.Pr, Lx=config.Lx, Lz=config.Lz, Nx=config.Nx, Nz=config.Nz, restart_file=None):
+def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, Prandtl=config.Pr, Lx=config.Lx, Lz=config.Lz, Nx=config.Nx, Nz=config.Nz, restart_file=None, alpha_file="current_alpha.npy"):
+
+    comm = MPI.COMM_WORLD
+    rank = comm.rank
 
     # Internal numerical parameters
     dealias = 3/2
@@ -29,6 +34,34 @@ def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, P
     tau_u1 = dist.VectorField(coords, name='tau_u1', bases=xbasis)
     tau_u2 = dist.VectorField(coords, name='tau_u2', bases=xbasis)
 
+# Alpha field for topology optimization
+    alpha = dist.Field(name='alpha', bases=(xbasis, zbasis))
+
+    # Load alpha safely
+    file_exists = False
+    global_alpha = None
+    if rank == 0:
+        if alpha_file and os.path.exists(alpha_file):
+            try:
+                global_alpha = np.load(alpha_file)
+                file_exists = True
+                logger.info(f"Loaded alpha from {alpha_file}")
+            except Exception:
+                file_exists = False
+
+    file_exists = comm.bcast(file_exists, root=0)
+
+    if file_exists:
+        # ファイルがある場合は従来通り c 空間の係数としてロード
+        local_size_alpha = alpha['c'].size
+        alpha_local = scatter_from_zero(global_alpha, local_size_alpha, comm)
+        np.copyto(alpha['c'], alpha_local.reshape(alpha['c'].shape).real)
+    else:
+        # ファイルがない初期状態では、物理グリッド (g空間) で一様に 1.0 を設定する
+        if rank == 0:
+            logger.info(f"No {alpha_file} found. Initializing alpha = 1.0 in grid space.")
+        alpha['g'] = 1.0
+
     # Substitutions
     kappa = (Rayleigh * Prandtl)**(-1/2)
     nu = (Rayleigh / Prandtl)**(-1/2)
@@ -43,7 +76,9 @@ def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, P
     problem = d3.IVP([p, b, u, tau_p, tau_b1, tau_b2, tau_u1, tau_u2], namespace=locals())
     problem.add_equation("trace(grad_u) + tau_p = 0")
     problem.add_equation("dt(b) - kappa*div(grad_b) + lift(tau_b2) = - u@grad(b)")
-    problem.add_equation("dt(u) - nu*div(grad_u) + grad(p) - b*ez + lift(tau_u2) = - u@grad(u)")
+    # 【ペナルティ項の追加】右辺に -(alpha**2)*u を付与
+    problem.add_equation("dt(u) - nu*div(grad_u) + grad(p) - b*ez + lift(tau_u2) = - u@grad(u) - (alpha**2)*u")
+    
     problem.add_equation("b(z=0) = Lz")
     problem.add_equation("u(z=0) = 0")
     problem.add_equation("b(z=Lz) = 0")
@@ -86,8 +121,6 @@ def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, P
     except:
         logger.error('Exception raised, triggering end of main loop.')
         raise
-    #finally:
-    #    solver.log_stats()
 
     finally:
         try:
@@ -96,7 +129,3 @@ def run_dns(run_duration=config.T_max, timestep=config.dt, Rayleigh=config.Ra, P
             pass
 
     return solver, b, u
-
-
-#if __name__ == '__main__':
-#    solver, final_b, final_u = run_dns(run_duration=10.0, timestep=0.05, Rayleigh=1e4)
