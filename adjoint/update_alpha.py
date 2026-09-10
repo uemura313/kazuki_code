@@ -138,7 +138,7 @@ def update_alpha_step(step_size=0.1):
         print(f"  -> Max Sensitivity = {global_max_sens:.4e}. Updating alpha...")
 
     # 4. alphaの更新と非負制約
-    alpha['g'] = alpha_g - step_size * sensitivity
+    alpha['g'] = alpha_g + step_size * sensitivity
     alpha['g'] = np.clip(alpha['g'], 0.0, None)
 
     # 5. 更新された alpha の保存
