@@ -18,17 +18,17 @@ def main():
     DT = config.dt
     BASE_FILE = config.INITIAL_GUESS_FILE
 
-    # 1. ソルバーの構築（使い回し）
+    # 1. Create solver
     solver, star_fields = create_adjoint_solver(BASE_FILE)
     local_x = pack_local_state(solver)
     local_size = len(local_x)
 
-    # 2. 全未知数の総数 (N_size) を全コアで共有
+    # 2. Share total unknown count across all ranks
     global_x0 = gather_to_zero(local_x, comm)
     N_size = global_x0.size if rank == 0 else 0
     N_size = comm.bcast(N_size, root=0)
 
-    # 探索ベクトル（全コアで常に同じ値を保持）
+    # Search vector
     x_k = np.zeros(N_size)
 
     if rank == 0:
@@ -36,7 +36,7 @@ def main():
         print(f" Solving Symmetrical Parallel JFNK for Ra = {config.Ra}")
         print(f"==================================================")
 
-    # 3. 残差評価関数（全コアが一斉に実行して同期する）
+    # 3. Residual evaluation function
     def compute_shooting_residual(x_array):
         local_xi = scatter_from_zero(x_array, local_size, comm)
         unpack_local_state(solver, local_xi)
@@ -46,7 +46,6 @@ def main():
         new_local_x = pack_local_state(solver)
         new_global_x = gather_to_zero(new_local_x, comm)
 
-        # Rank 0 で結合された配列を、全コアにブロードキャスト（共有）
         new_global_x = comm.bcast(new_global_x, root=0)
         return new_global_x - x_array
 
@@ -60,7 +59,7 @@ def main():
         F_plus = compute_shooting_residual(x_current + epsilon * v_array)
         return (F_plus - current_F) / epsilon
 
-    # 4. ニュートンループ（全コアが同時に同じ計算ルートを通る）
+    # 4. Newton iteration loop
     for i in range(config.MAX_ITER):
         current_F = compute_shooting_residual(x_k)
         b_array = -current_F
@@ -71,16 +70,14 @@ def main():
 
         if residual_norm < 1e-14:
             if rank == 0:
-                print("    -> Adjoint State Converged successfully!")
+                print(f"    -> Adjoint State Converged successfully!")
             break
 
-        # 全コアがLinearOperatorを構築し、全コアがGMRESを実行することで、
-        # 内部のapply_J_shootingが1コアも欠けることなく完全に同期して呼ばれます
         matvec = lambda v: apply_J_shooting(v, x_k, current_F)
         J_op = LinearOperator((N_size, N_size), matvec=matvec)
 
         if rank == 0:
-            print("    Solving inner GMRES...")
+            print(f"    Solving inner GMRES...")
 
         delta_x, exit_code = gmres(J_op, b_array, rtol=1e-2, restart=20, maxiter=5)
         x_k = x_k + delta_x
