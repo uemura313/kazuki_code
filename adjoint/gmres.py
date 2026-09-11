@@ -22,14 +22,13 @@ def main():
     T_max = config.T_max
     dt = config.dt
 
-
-    # 初期設定のため1度だけ構築してサイズを取得
+    # Build once to get array size
     dummy_solver, _, _ = run_dns(run_duration=0.0)
     local_size = len(pack_local_state(dummy_solver))
     del dummy_solver
 
     # =====================================================================
-    # ワーカーフェーズ (Rank 1, 2, 3)
+    # Worker phase (Rank > 0)
     # =====================================================================
     if rank > 0:
         while True:
@@ -40,20 +39,20 @@ def main():
             elif cmd == 'EVAL':
                 local_x = scatter_from_zero(None, local_size, comm)
 
-                # 【最重要】毎回ゼロからソルバーを構築し、過去の履歴を完全にリセットする
+                # Rebuild solver from scratch to reset past history
                 solver, b, u = run_dns(run_duration=0.0)
                 unpack_local_state(solver, local_x)
                 advance_solver(solver, T_max, dt)
                 new_local_x = pack_local_state(solver)
                 gather_to_zero(new_local_x, comm)
 
-                # メモリ解放
+                # Free memory
                 del solver, b, u
                 gc.collect()
         return
 
     # =====================================================================
-    # マスターフェーズ (Rank 0) - 自作の完璧なJFNKアルゴリズム
+    # Master phase (Rank 0)
     # =====================================================================
     else:
         print(f"==================================================")
@@ -61,7 +60,7 @@ def main():
         print(f" Using delta_T = {T_max}")
         print(f"==================================================")
 
-        # 1. 初期推測値の読み込み
+        # 1. Load initial guess
         guess_file = config.INITIAL_GUESS_FILE
         try:
             x_k = np.load(guess_file)
@@ -73,32 +72,27 @@ def main():
 
         N_size = x_k.size
 
-        # 2. 写像評価関数（ワーカーに指示を出して F(x) - x を計算）
+        # 2. Compute shooting residual
         def compute_shooting_residual(x_array):
-            # ワーカーに「評価開始」を合図
             comm.bcast('EVAL', root=0)
 
-            # 1. 分割した配列を受け取る（Rank 0自身も）
             local_x = scatter_from_zero(x_array, local_size, comm)
 
-            # 2. 【最重要】Rank 0自身もDedalusの計算に合流する！
+            # Rank 0 joins the Dedalus computation
             solver, b, u = run_dns(run_duration=0.0)
             unpack_local_state(solver, local_x)
 
-            # 時間積分（ここでRank 0〜3が裏で激しく通信しながら計算を進めます）
             advance_solver(solver, T_max, dt)
             new_local_x = pack_local_state(solver)
 
-            # 3. 全コアの結果を Rank 0 に集約
             new_global_x = gather_to_zero(new_local_x, comm)
 
-            # メモリ解放（使い回し防止）
             del solver, b, u
             gc.collect()
 
             return new_global_x - x_array
 
-        # 3. 動的 epsilon によるヤコビアン近似（以前の成功コードをそのまま使用）
+        # 3. Jacobian approximation using dynamic epsilon
         def apply_J_shooting(v_array, x_current, current_F):
             norm_x = np.linalg.norm(x_current)
             norm_v = np.linalg.norm(v_array)
@@ -110,12 +104,11 @@ def main():
 
             return (F_plus - current_F) / epsilon
 
-        # 4. ニュートン法のメインループ
+        # 4. Newton method main loop
         for i in range(config.MAX_ITER):
             current_F = compute_shooting_residual(x_k)
             b_array = -current_F
 
-            # RMSノルムで正確な誤差を評価
             residual_norm = np.linalg.norm(b_array) / np.sqrt(N_size)
             print(f"  Newton Iteration {i}: RMS Residual = {residual_norm:.4e}")
 
@@ -132,7 +125,7 @@ def main():
             x_k = x_k + delta_x
             gc.collect()
 
-        # 5. 収束結果の保存と終了処理
+        # 5. Save results and finalize
         save_filename = f"steady_state_Ra_{config.Ra:.2e}.npy"
         np.save(save_filename, x_k)
         print(f"  Saved converged steady state to: {save_filename}")
