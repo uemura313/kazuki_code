@@ -19,7 +19,7 @@ def main():
 
     # 1. Specify the steady-state base flow file
     steady_file = f"steady_state_Ra_{config.Ra:.2e}.npy"
-
+    
     if rank == 0:
         print(f" -> Base flow: {steady_file}")
 
@@ -31,9 +31,9 @@ def main():
     # 3. Advance the adjoint fields in time using advance_solver
     if rank == 0:
         print(" -> Advancing adjoint solver in time...")
-
+    
     # Set duration and timestep as needed
-    advance_solver(solver, duration=20.0, timestep=0.005)
+    advance_solver(solver, duration=200.0, timestep=0.025)
 
     # 4. Pack local state coefficients and gather them to Rank 0
     local_x = pack_local_state(solver)
@@ -49,4 +49,4 @@ def main():
         print(f"==================================================")
 
 if __name__ == '__main__':
-    main()      
+    main()
