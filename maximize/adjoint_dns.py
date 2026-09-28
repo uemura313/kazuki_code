@@ -105,8 +105,8 @@ def run_adjoint_dns(base_state_file, alpha_file="current_alpha.npy"):
     problem = d3.IVP(star_fields, namespace=locals())
 
     problem.add_equation("trace(grad_u_star) + tau_p_s = 0")
-    problem.add_equation("dt(b_star) - kappa*div(grad_b_star) + lift(tau_b2_s) = -(u_base @ grad_b_star) - w_base + w_star")
-    problem.add_equation("dt(u_star) - nu*div(grad_u_star) + grad(p_star) + lift(tau_u2_s) = -(u_base @ grad_u_star) - (grad_u_base @ u_star) - b_base*ez - b_star*grad_b_base - (alpha**2)*u_star")
+    problem.add_equation("dt(b_star) - kappa*div(grad_b_star) + lift(tau_b2_s) = (u_base @ grad_b_star) - w_base + w_star")
+    problem.add_equation("dt(u_star) - nu*div(grad_u_star) - grad(p_star) + lift(tau_u2_s) = (u_base @ grad_u_star) - (grad_u_base @ u_star) - b_base*ez - b_star*grad_b_base - (alpha**2)*u_star")
 
     problem.add_equation("b_star(z=0) = 0")
     problem.add_equation("u_star(z=0) = 0")
@@ -132,9 +132,9 @@ def advance_solver(solver, duration, timestep, analysis_interval=1.0):
     print("Starting time integration...")
     while solver.proceed:
         solver.step(timestep)
-
+        
         # Print progress every 100 steps (or based on iteration)
-        if solver.iteration % 100 == 0:
+        if solver.iteration % 50 == 0:
             print(f"Iteration: {solver.iteration}, Sim Time: {solver.sim_time:.3f} / {duration:.3f}")
 
     print("Time integration finished.")
