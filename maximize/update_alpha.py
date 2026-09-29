@@ -5,7 +5,6 @@ import config
 from trans import scatter_from_zero
 
 def load_field_safely(filename, fields, comm):
-    """ファイルの存在を全コアで共有し、デッドロックを防ぐ安全な読み込み関数"""
     rank = comm.rank
     
     file_exists = False
@@ -19,7 +18,6 @@ def load_field_safely(filename, fields, comm):
             print(f"  [ERROR] Could not find {filename}.")
             file_exists = False
 
-    # ファイルの有無を全コアにブロードキャスト（デッドロック防止）
     file_exists = comm.bcast(file_exists, root=0)
     if not file_exists:
         return False
@@ -44,10 +42,7 @@ def load_field_safely(filename, fields, comm):
             np.copyto(field['c'], chunk)
     return True
 
-def update_alpha_step(step_size=0.1):
-    """
-    1ステップ分の感度計算と alpha の更新を行い、感度の最大絶対値を返す関数。
-    """
+def update_alpha_step(step_size):
     comm = MPI.COMM_WORLD
     rank = comm.rank
 
@@ -59,7 +54,7 @@ def update_alpha_step(step_size=0.1):
     xbasis = d3.RealFourier(coords['x'], size=Nx, bounds=(0, Lx), dealias=3/2)
     zbasis = d3.ChebyshevT(coords['z'], size=Nz, bounds=(0, Lz), dealias=3/2)
 
-    # ベースフロー変数定義
+    # Base fields definition
     p_base = dist.Field(name='p_base', bases=(xbasis,zbasis))
     b_base = dist.Field(name='b_base', bases=(xbasis,zbasis))
     u_base = dist.VectorField(coords, name='u_base', bases=(xbasis,zbasis))
@@ -70,7 +65,7 @@ def update_alpha_step(step_size=0.1):
     tau_u2_b = dist.VectorField(coords, name='tau_u2_b', bases=xbasis)
     base_fields = [p_base, b_base, u_base, tau_p_b, tau_b1_b, tau_b2_b, tau_u1_b, tau_u2_b]
 
-    # スター変数定義
+    # Star fields definition
     p_star = dist.Field(name='p_star', bases=(xbasis,zbasis))
     b_star = dist.Field(name='b_star', bases=(xbasis,zbasis))
     u_star = dist.VectorField(coords, name='u_star', bases=(xbasis,zbasis))
@@ -92,11 +87,11 @@ def update_alpha_step(step_size=0.1):
         print(f" Calculating Sensitivity & Updating Alpha")
         print(f"==================================================")
 
-    # 1. データの安全な読み込み
+    # 1. Load base and star fields
     if not load_field_safely(steady_file, base_fields, comm): return -1.0
     if not load_field_safely(star_file, star_fields, comm): return -1.0
 
-    # 2. alphaの安全な読み込みまたは初期化（全コアで同期）
+    # 2. Load or initialize alpha
     local_size_alpha = alpha['c'].size
     global_size_alpha = comm.allreduce(local_size_alpha, op=MPI.SUM)
 
@@ -112,21 +107,23 @@ def update_alpha_step(step_size=0.1):
 
     file_exists = comm.bcast(file_exists, root=0)
 
-    if not file_exists:
+    if file_exists:
+        alpha_local = scatter_from_zero(global_alpha, local_size_alpha, comm)
+        np.copyto(alpha['c'], alpha_local.reshape(alpha['c'].shape).real)
+    else:
         if rank == 0:
             print(f"  No {alpha_file} found. Initializing alpha = 1.0")
-        global_alpha = np.ones(global_size_alpha, dtype=np.float64)
-
-    alpha_local = scatter_from_zero(global_alpha, local_size_alpha, comm)
-    np.copyto(alpha['c'], alpha_local.reshape(alpha['c'].shape).real)
+        alpha['g'] = 1.0
 
     if rank == 0:
         print("  -> Data loaded. Calculating sensitivity...")
 
-    # 3. 感度の計算
+    # 3. Calculate sensitivity
     u_b_g = u_base['g']
     u_s_g = u_star['g']
     alpha_g = alpha['g']
+    
+    print(f"alpha_g min/max: {np.min(alpha_g)}, {np.max(alpha_g)}")
 
     dot_product = u_b_g[0] * u_s_g[0] + u_b_g[1] * u_s_g[1]
     sensitivity = alpha_g * dot_product
@@ -137,11 +134,13 @@ def update_alpha_step(step_size=0.1):
     if rank == 0:
         print(f"  -> Max Sensitivity = {global_max_sens:.4e}. Updating alpha...")
 
-    # 4. alphaの更新と非負制約
+    # 4. Update alpha with non-negative constraint
     alpha['g'] = alpha_g + step_size * sensitivity
     alpha['g'] = np.clip(alpha['g'], 0.0, None)
 
-    # 5. 更新された alpha の保存
+    print(f"alpha_g min/max: {np.min(alpha_g)}, {np.max(alpha_g)}")
+
+    # 5. Save updated alpha
     alpha_local_flat = alpha['c'].flatten()
     gathered_list = comm.gather(alpha_local_flat, root=0)
 
@@ -151,8 +150,12 @@ def update_alpha_step(step_size=0.1):
         print(f"  [Update] step_size={step_size:.3f} | Max Sensitivity = {global_max_sens:.4e}")
         print(f"  Updated alpha saved to {alpha_file}")
         print(f"==================================================")
-
+        
+        print(f"alpha_g min/max: {np.min(alpha_g)}, {np.max(alpha_g)}")
+        print(f"sensitivity min/max: {np.min(sensitivity)}, {np.max(sensitivity)}")
+        print(f"Update term min/max: {np.min(step_size * sensitivity)}, {np.max(step_size * sensitivity)}")
+        
     return global_max_sens
 
 if __name__ == "__main__":
-    update_alpha_step(step_size=0.1)
+    update_alpha_step(step_size=1.0)
