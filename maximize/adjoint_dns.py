@@ -68,7 +68,6 @@ def run_adjoint_dns(base_state_file, alpha_file="current_alpha.npy"):
 
     alpha = dist.Field(name='alpha', bases=(xbasis, zbasis))
 
-    # 【対応部分】安全な alpha のロード（ファイルがなければ g 空間で 1.0 に設定）
     file_exists = False
     global_alpha = None
     if rank == 0:
